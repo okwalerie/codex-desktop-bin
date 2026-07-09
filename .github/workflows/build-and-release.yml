@@ -1,0 +1,115 @@
+name: Build and Release
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-and-release
+  cancel-in-progress: false
+
+env:
+  DMG_URL: https://persistent.oaistatic.com/codex-app-prod/Codex.dmg
+  UPSTREAM_REPO: https://github.com/ilysenko/codex-desktop-linux.git
+
+jobs:
+  # Cheap gate: plain runner, ~30s. The expensive fedora-container build only
+  # runs when the upstream DMG fingerprint differs from the latest release.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+      fingerprint: ${{ steps.compare.outputs.fingerprint }}
+    steps:
+      - name: Fingerprint upstream DMG and compare with latest release
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fp="$(curl -fsSLI --max-time 30 "$DMG_URL" \
+            | awk 'tolower($0) ~ /^(etag|last-modified|content-length):/ {sub(/\r$/,""); print tolower($0)}' \
+            | sort | sha256sum | cut -d' ' -f1)"
+          echo "fingerprint=$fp" >> "$GITHUB_OUTPUT"
+
+          last_fp="$(gh release view --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null \
+            | grep -oE 'fingerprint: [0-9a-f]{64}' | awk '{print $2}' || true)"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$last_fp" != "$fp" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream changed (or manual run): building. fp=$fp last=$last_fp"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged (fp=$fp)"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname gh
+
+      - name: Build RPM from upstream recipe
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
+          cd /tmp/src
+          PACKAGE_WITH_UPDATER=0 make build-app
+          PACKAGE_WITH_UPDATER=0 make rpm
+          cp dist/*.rpm "$GITHUB_WORKSPACE/"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          rpm_file="$(ls *.rpm | head -1)"
+          version="$(rpm -qp --qf '%{VERSION}' "$rpm_file")"
+          gh release create "v$version" "$rpm_file" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Codex Desktop $version" \
+            --notes "Automated rebuild of upstream Codex.dmg via ilysenko/codex-desktop-linux.
+
+          fingerprint: ${{ needs.check.outputs.fingerprint }}"
+
+      - name: Prune old releases (keep 3)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | tail -n +4 \
+            | while read -r tag; do
+                echo "pruning $tag"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              done
+
+  # GitHub disables cron workflows after 60 days without repo activity.
+  # Push an empty commit when the branch has been quiet for >25 days.
+  keepalive:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keepalive commit if branch is stale
+        run: |
+          set -euo pipefail
+          last="$(git log -1 --format=%ct)"
+          age_days=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "last commit ${age_days}d ago"
+          if [ "$age_days" -ge 25 ]; then
+            git config user.name github-actions
+            git config user.email github-actions@users.noreply.github.com
+            git commit --allow-empty -m "keepalive: prevent scheduled workflow expiry"
+            git push
+          fi
