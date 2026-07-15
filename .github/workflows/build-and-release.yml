@@ -52,47 +52,50 @@ jobs:
     if: needs.check.outputs.changed == 'true'
     runs-on: [self-hosted, linux, x64, codex-desktop]
     timeout-minutes: 90
-    container:
-      image: registry.fedoraproject.org/fedora:44
     steps:
-      - name: Install build dependencies
-        run: dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname gh
-
-      - name: Build RPM from upstream recipe
-        run: |
-          set -euo pipefail
-          git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
-          cd /tmp/src
-          PACKAGE_WITH_UPDATER=0 make build-app
-          PACKAGE_WITH_UPDATER=0 make rpm
-          cp dist/*.rpm "$GITHUB_WORKSPACE/"
-
-      - name: Create release
+      # GitHub's job-level `container:` support requires Docker API semantics.
+      # This runner uses rootless Podman, so run the Fedora build container directly.
+      - name: Build and release in Fedora container
         env:
           GH_TOKEN: ${{ github.token }}
+          FINGERPRINT: ${{ needs.check.outputs.fingerprint }}
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          rpm_file="$(ls *.rpm | head -1)"
-          version="$(rpm -qp --qf '%{VERSION}' "$rpm_file")"
-          gh release create "v$version" "$rpm_file" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Codex Desktop $version" \
-            --notes "Automated rebuild of upstream Codex.dmg via ilysenko/codex-desktop-linux.
+          podman run --rm \
+            -e HOME=/tmp \
+            -e GH_TOKEN \
+            -e GITHUB_REPOSITORY \
+            -e UPSTREAM_REPO \
+            -e FINGERPRINT \
+            -v "$GITHUB_WORKSPACE:/workspace:Z" \
+            -w /workspace \
+            registry.fedoraproject.org/fedora:44 \
+            bash -euo pipefail -c '
+              dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname gh
 
-          fingerprint: ${{ needs.check.outputs.fingerprint }}"
+              git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
+              cd /tmp/src
+              PACKAGE_WITH_UPDATER=0 make build-app
+              PACKAGE_WITH_UPDATER=0 make rpm
+              cp dist/*.rpm /workspace/
 
-      - name: Prune old releases (keep 3)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
-            | tail -n +4 \
-            | while read -r tag; do
-                echo "pruning $tag"
-                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-              done
+              cd /workspace
+              rpm_file="$(ls *.rpm | head -1)"
+              version="$(rpm -qp --qf "%{VERSION}" "$rpm_file")"
+              gh release create "v$version" "$rpm_file" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Codex Desktop $version" \
+                --notes "Automated rebuild of upstream Codex.dmg via ilysenko/codex-desktop-linux.
+
+              fingerprint: $FINGERPRINT"
+
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq ".[].tagName" \
+                | tail -n +4 \
+                | while read -r tag; do
+                    echo "pruning $tag"
+                    gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+                  done
+            '
 
   # GitHub disables cron workflows after 60 days without repo activity.
   # Push an empty commit when the branch has been quiet for >25 days.
