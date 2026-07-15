@@ -20,7 +20,7 @@ jobs:
   # Cheap gate: plain runner, ~30s. The expensive fedora-container build only
   # runs when the upstream DMG fingerprint differs from the latest release.
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, codex-desktop]
     outputs:
       changed: ${{ steps.compare.outputs.changed }}
       fingerprint: ${{ steps.compare.outputs.fingerprint }}
@@ -50,7 +50,7 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, codex-desktop]
     timeout-minutes: 90
     container:
       image: registry.fedoraproject.org/fedora:44
@@ -98,7 +98,7 @@ jobs:
   # Push an empty commit when the branch has been quiet for >25 days.
   keepalive:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, codex-desktop]
     steps:
       - uses: actions/checkout@v4
       - name: Keepalive commit if branch is stale
