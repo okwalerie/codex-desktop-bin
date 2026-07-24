@@ -57,12 +57,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          architectures='[{"runner_arch":"x64","rpm_arch":"x86_64"}]'
+          architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"}]'
           if gh api \
             "/repos/$GITHUB_REPOSITORY/actions/runners" \
             --jq '.runners[] | select(.status == "online" and (.labels | map(.name | ascii_downcase) | index("codex-desktop")) and (.labels | map(.name | ascii_downcase) | index("arm64"))) | .name' \
             | grep -q .; then
-            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64"},{"runner_arch":"arm64","rpm_arch":"aarch64"}]'
+            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"},{"runner_arch":"arm64","rpm_arch":"aarch64","container_arch":"arm64"}]'
           fi
           echo "architectures=$architectures" >> "$GITHUB_OUTPUT"
           echo "Selected architectures: $architectures"
@@ -82,7 +82,7 @@ jobs:
       - name: Build RPM in Fedora container
         run: |
           set -euo pipefail
-          podman run --rm \
+          podman run --rm --arch "${{ matrix.container_arch }}" \
             -e HOME=/tmp \
             -e UPSTREAM_REPO \
             -v "$GITHUB_WORKSPACE:/workspace:Z" \
