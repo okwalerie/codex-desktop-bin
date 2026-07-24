@@ -11,9 +11,13 @@ declines to redistribute publicly. these builds are for personal use.
 
 - `build-and-release.yml` runs every 6h: a cheap job fingerprints the upstream
   DMG (etag/last-modified/length); if it differs from the fingerprint recorded
-  in the latest release body, a fedora:44 container job builds the rpm
-  (`PACKAGE_WITH_UPDATER=0` — rpm-ostree owns updates) and publishes a release
-  tagged with the build-timestamp version. old releases are pruned (keep 3).
+  in the latest release body, native Fedora 44 container jobs build RPMs
+  (`PACKAGE_WITH_UPDATER=0` — rpm-ostree owns updates) and a single release job
+  publishes their architecture-qualified assets under a build-timestamp tag.
+  x86_64 is always built. aarch64 is added automatically when an online
+  self-hosted runner has the `codex-desktop` and `arm64` labels; native builds
+  are required because the package payload is architecture-specific. Old
+  releases are pruned (keep 3).
 - `workflow_dispatch` forces a rebuild (use after upstream fixes patches for a
   new DMG that broke the build).
 - a keepalive job pushes an empty commit if the branch is >25 days quiet, so

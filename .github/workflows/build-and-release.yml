@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: build-and-release
@@ -17,13 +18,14 @@ env:
   UPSTREAM_REPO: https://github.com/ilysenko/codex-desktop-linux.git
 
 jobs:
-  # Cheap gate: plain runner, ~30s. The expensive fedora-container build only
-  # runs when the upstream DMG fingerprint differs from the latest release.
+  # Cheap gate: plain runner, ~30s. The expensive Fedora container builds only
+  # run when the upstream DMG fingerprint differs from the latest release.
   check:
     runs-on: [self-hosted, linux, x64, codex-desktop]
     outputs:
       changed: ${{ steps.compare.outputs.changed }}
       fingerprint: ${{ steps.compare.outputs.fingerprint }}
+      architectures: ${{ steps.runners.outputs.architectures }}
     steps:
       - name: Fingerprint upstream DMG and compare with latest release
         id: compare
@@ -47,55 +49,94 @@ jobs:
             echo "Upstream unchanged (fp=$fp)"
           fi
 
+      # Keep the x64-only setup working today, and automatically add aarch64
+      # once a native ARM runner with the project label is registered.
+      - name: Select available native build architectures
+        id: runners
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          architectures='[{"runner_arch":"x64","rpm_arch":"x86_64"}]'
+          if gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/runners" \
+            --jq '.runners[] | select(.status == "online" and (.labels | map(.name | ascii_downcase) | index("codex-desktop")) and (.labels | map(.name | ascii_downcase) | index("arm64"))) | .name' \
+            | grep -q .; then
+            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64"},{"runner_arch":"arm64","rpm_arch":"aarch64"}]'
+          fi
+          echo "architectures=$architectures" >> "$GITHUB_OUTPUT"
+          echo "Selected architectures: $architectures"
+
   build:
     needs: check
     if: needs.check.outputs.changed == 'true'
-    runs-on: [self-hosted, linux, x64, codex-desktop]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.check.outputs.architectures) }}
+    runs-on: [self-hosted, linux, "${{ matrix.runner_arch }}", codex-desktop]
     timeout-minutes: 90
     steps:
       # GitHub's job-level `container:` support requires Docker API semantics.
       # This runner uses rootless Podman, so run the Fedora build container directly.
-      - name: Build and release in Fedora container
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FINGERPRINT: ${{ needs.check.outputs.fingerprint }}
+      - name: Build RPM in Fedora container
         run: |
           set -euo pipefail
           podman run --rm \
             -e HOME=/tmp \
-            -e GH_TOKEN \
-            -e GITHUB_REPOSITORY \
             -e UPSTREAM_REPO \
-            -e FINGERPRINT \
             -v "$GITHUB_WORKSPACE:/workspace:Z" \
             -w /workspace \
             registry.fedoraproject.org/fedora:44 \
             bash -euo pipefail -c '
-              dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname gh
+              dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname
 
               git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
               cd /tmp/src
               PACKAGE_WITH_UPDATER=0 make build-app
               PACKAGE_WITH_UPDATER=0 make rpm
-              cp dist/*.rpm /workspace/
-
-              cd /workspace
-              rpm_file="$(ls *.rpm | head -1)"
-              version="$(rpm -qp --qf "%{VERSION}" "$rpm_file")"
-              gh release create "v$version" "$rpm_file" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "Codex Desktop $version" \
-                --notes "Automated rebuild of upstream Codex.dmg via ilysenko/codex-desktop-linux.
-
-              fingerprint: $FINGERPRINT"
-
-              gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq ".[].tagName" \
-                | tail -n +4 \
-                | while read -r tag; do
-                    echo "pruning $tag"
-                    gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-                  done
+              mkdir -p /workspace/artifacts/${{ matrix.rpm_arch }}
+              cp dist/*.rpm /workspace/artifacts/${{ matrix.rpm_arch }}/
             '
+      - name: Upload ${{ matrix.rpm_arch }} RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.rpm_arch }}
+          path: artifacts/${{ matrix.rpm_arch }}/*.rpm
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    if: needs.check.outputs.changed == 'true'
+    runs-on: [self-hosted, linux, x64, codex-desktop]
+    steps:
+      - name: Download RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release and prune old releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINGERPRINT: ${{ needs.check.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rpm_files=(artifacts/*/*.rpm)
+          ((${#rpm_files[@]})) || { echo "No RPM artifacts downloaded" >&2; exit 1; }
+          version="$(rpm -qp --qf '%{VERSION}' "${rpm_files[0]}")"
+          gh release create "v$version" "${rpm_files[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Codex Desktop $version" \
+            --notes "Automated rebuild of upstream Codex.dmg via ilysenko/codex-desktop-linux.
+
+          fingerprint: $FINGERPRINT"
+
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | tail -n +4 \
+            | while read -r tag; do
+                echo "pruning $tag"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              done
 
   # GitHub disables cron workflows after 60 days without repo activity.
   # Push an empty commit when the branch has been quiet for >25 days.
