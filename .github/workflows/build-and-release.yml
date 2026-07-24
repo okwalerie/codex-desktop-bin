@@ -63,6 +63,10 @@ jobs:
             --jq '.runners[] | select(.status == "online" and (.labels | map(.name | ascii_downcase) | index("codex-desktop")) and (.labels | map(.name | ascii_downcase) | index("arm64"))) | .name' \
             | grep -q .; then
             architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"},{"runner_arch":"arm64","rpm_arch":"aarch64","container_arch":"arm64"}]'
+            echo "Selected native aarch64 runner."
+          elif podman run --rm --arch arm64 registry.fedoraproject.org/fedora:44 true; then
+            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"},{"runner_arch":"x64","rpm_arch":"aarch64","container_arch":"arm64"}]'
+            echo "Selected qemu-emulated aarch64 build on the x64 runner."
           fi
           echo "architectures=$architectures" >> "$GITHUB_OUTPUT"
           echo "Selected architectures: $architectures"
@@ -75,7 +79,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.check.outputs.architectures) }}
     runs-on: [self-hosted, linux, "${{ matrix.runner_arch }}", codex-desktop]
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       # GitHub's job-level `container:` support requires Docker API semantics.
       # This runner uses rootless Podman, so run the Fedora build container directly.
