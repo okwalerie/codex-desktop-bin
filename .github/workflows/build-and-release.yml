@@ -99,6 +99,7 @@ jobs:
               cd /tmp/src
               PACKAGE_WITH_UPDATER=0 make build-app
               PACKAGE_WITH_UPDATER=0 make rpm
+              rm -rf /workspace/artifacts/${{ matrix.rpm_arch }}
               mkdir -p /workspace/artifacts/${{ matrix.rpm_arch }}
               cp dist/*.rpm /workspace/artifacts/${{ matrix.rpm_arch }}/
             '
@@ -114,6 +115,10 @@ jobs:
     if: needs.check.outputs.changed == 'true'
     runs-on: [self-hosted, linux, x64, codex-desktop]
     steps:
+      # Self-hosted runner workspaces persist between jobs/runs. Never let old
+      # RPMs become accidental release assets.
+      - name: Clear prior artifact workspace
+        run: rm -rf artifacts
       - name: Download RPM artifacts
         uses: actions/download-artifact@v4
         with:
