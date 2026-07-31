@@ -97,8 +97,11 @@ jobs:
 
               git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
               cd /tmp/src
-              PACKAGE_WITH_UPDATER=0 make build-app
-              PACKAGE_WITH_UPDATER=0 make rpm
+              # Native SQLite and PTY rebuilds are memory-intensive. Keep node-gyp,
+              # Electron rebuild, and RPM compression single-threaded on the shared
+              # self-hosted runner so either architecture remains within its budget.
+              MAX_BUILD_THREADS=1 PACKAGE_WITH_UPDATER=0 make build-app
+              MAX_BUILD_THREADS=1 PACKAGE_WITH_UPDATER=0 make rpm
               rm -rf /workspace/artifacts/${{ matrix.rpm_arch }}
               mkdir -p /workspace/artifacts/${{ matrix.rpm_arch }}
               cp dist/*.rpm /workspace/artifacts/${{ matrix.rpm_arch }}/
