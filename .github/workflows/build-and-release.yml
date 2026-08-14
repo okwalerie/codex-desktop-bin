@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '23 */6 * * *'
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: 'Build and validate artifacts without publishing a release'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -93,7 +99,7 @@ jobs:
             -w /workspace \
             registry.fedoraproject.org/fedora:44 \
             bash -euo pipefail -c '
-              dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname
+              dnf install -y -q python3 7zip curl unzip rpm-build rpm make gcc-c++ git nodejs npm gawk hostname dpkg
 
               git clone --depth 1 "$UPSTREAM_REPO" /tmp/src
               cd /tmp/src
@@ -115,7 +121,7 @@ jobs:
 
   release:
     needs: [check, build]
-    if: needs.check.outputs.changed == 'true'
+    if: needs.check.outputs.changed == 'true' && inputs.validate_only != true
     runs-on: [self-hosted, linux, x64, codex-desktop]
     steps:
       # Self-hosted runner workspaces persist between jobs/runs. Never let old
