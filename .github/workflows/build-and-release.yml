@@ -31,7 +31,6 @@ jobs:
     outputs:
       changed: ${{ steps.compare.outputs.changed }}
       fingerprint: ${{ steps.compare.outputs.fingerprint }}
-      architectures: ${{ steps.runners.outputs.architectures }}
     steps:
       - name: Fingerprint upstream DMG and compare with latest release
         id: compare
@@ -55,47 +54,38 @@ jobs:
             echo "Upstream unchanged (fp=$fp)"
           fi
 
-      # Keep the x64-only setup working today, and automatically add aarch64
-      # once a native ARM runner with the project label is registered.
-      - name: Select available native build architectures
-        id: runners
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"}]'
-          if gh api \
-            "/repos/$GITHUB_REPOSITORY/actions/runners" \
-            --jq '.runners[] | select(.status == "online" and (.labels | map(.name | ascii_downcase) | index("codex-desktop")) and (.labels | map(.name | ascii_downcase) | index("arm64"))) | .name' \
-            | grep -q .; then
-            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"},{"runner_arch":"arm64","rpm_arch":"aarch64","container_arch":"arm64"}]'
-            echo "Selected native aarch64 runner."
-          elif podman run --rm --arch arm64 registry.fedoraproject.org/fedora:44 true; then
-            architectures='[{"runner_arch":"x64","rpm_arch":"x86_64","container_arch":"amd64"},{"runner_arch":"x64","rpm_arch":"aarch64","container_arch":"arm64"}]'
-            echo "Selected qemu-emulated aarch64 build on the x64 runner."
-          fi
-          echo "architectures=$architectures" >> "$GITHUB_OUTPUT"
-          echo "Selected architectures: $architectures"
-
   build:
     needs: check
     if: needs.check.outputs.changed == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.check.outputs.architectures) }}
-    runs-on: [self-hosted, linux, "${{ matrix.runner_arch }}", codex-desktop]
+        include:
+          # Retain the project runner for the existing x86_64 package.
+          - runner_labels: '["self-hosted", "linux", "x64", "codex-desktop"]'
+            rpm_arch: x86_64
+            container_platform: linux/amd64
+            container_engine: podman
+            workspace_mount: ':Z'
+          # GitHub-hosted Arm runners build the native aarch64 RPM. This avoids
+          # relying on mutable host binfmt/QEMU registration on the x64 runner.
+          - runner_labels: '["ubuntu-24.04-arm"]'
+            rpm_arch: aarch64
+            container_platform: linux/arm64
+            container_engine: docker
+            workspace_mount: ''
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
     timeout-minutes: 180
     steps:
-      # GitHub's job-level `container:` support requires Docker API semantics.
-      # This runner uses rootless Podman, so run the Fedora build container directly.
+      # Run a Fedora container explicitly: the retained x64 runner uses rootless
+      # Podman, while GitHub's hosted ARM runner supplies Docker.
       - name: Build RPM in Fedora container
         run: |
           set -euo pipefail
-          podman run --rm --arch "${{ matrix.container_arch }}" \
+          ${{ matrix.container_engine }} run --rm --platform "${{ matrix.container_platform }}" \
             -e HOME=/tmp \
             -e UPSTREAM_REPO \
-            -v "$GITHUB_WORKSPACE:/workspace:Z" \
+            -v "$GITHUB_WORKSPACE:/workspace${{ matrix.workspace_mount }}" \
             -w /workspace \
             registry.fedoraproject.org/fedora:44 \
             bash -euo pipefail -c '
