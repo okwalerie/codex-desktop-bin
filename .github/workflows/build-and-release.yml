@@ -108,6 +108,12 @@ jobs:
           name: rpm-${{ matrix.rpm_arch }}
           path: artifacts/${{ matrix.rpm_arch }}/*.rpm
           if-no-files-found: error
+      # Fedora's mutable tag leaves the previous image dangling on the persistent
+      # rootless-Podman runner. Prune after every x86 build, including failures,
+      # so repeated scheduled builds cannot exhaust the runner filesystem.
+      - name: Prune transient Podman images
+        if: always() && matrix.container_engine == 'podman'
+        run: podman image prune --force
 
   release:
     needs: [check, build]
