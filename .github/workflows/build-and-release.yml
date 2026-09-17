@@ -77,6 +77,12 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner_labels) }}
     timeout-minutes: 180
     steps:
+      # The x86_64 runner keeps rootless Podman storage between jobs. Reclaim
+      # dangling images before pulling/building so stale Fedora layers cannot
+      # make the expensive container build fail before its post-build cleanup.
+      - name: Prune transient Podman images before build
+        if: matrix.container_engine == 'podman'
+        run: podman image prune --force
       # Run a Fedora container explicitly: the retained x64 runner uses rootless
       # Podman, while GitHub's hosted ARM runner supplies Docker.
       - name: Build RPM in Fedora container
